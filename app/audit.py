@@ -201,23 +201,14 @@ def audit_graph(payload: dict[str, object]) -> dict[str, object]:
         adjacency[u].append(v)
         predecessors[v].append(u)
 
-    # Wide merge points are common in maintenance fan-outs.  The core can
-    # scan their reverse edges by DFS region to avoid repeatedly probing
-    # the same union/find ancestry during semidominator evaluation.
-    largest_fan_in = max((len(incoming) for incoming in predecessors), default=0)
-    predecessor_region_size = 0
-    if largest_fan_in > 96:
-        predecessor_region_size = 256
-
+    # ---- Dominator analysis in one global pass ---------------------------
     root_id = index[raw_root]
     is_terminal = [False] * n
     for term in terminals:
         is_terminal[index[term]] = True
 
-    # ---- Dominator analysis in one global pass ---------------------------
     result = compute_dominators(
         n, adjacency, predecessors, root_id, is_terminal, labels=nodes,
-        predecessor_region_size=predecessor_region_size,
     )
     counts = count_dominated_terminals(result)
 

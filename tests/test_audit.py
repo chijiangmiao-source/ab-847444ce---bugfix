@@ -84,6 +84,69 @@ def test_root_can_feed_terminal_directly():
     assert out["unreachable_terminals"] == ["T2"]
 
 
+def wide_merge_payload(bypass_count: int = 96) -> dict:
+    """Emergency beam-stop network: R->A->M plus ``bypass_count`` bypasses.
+
+    Each bypass goes R -> unique relay S<i> -> M; M feeds one protected
+    terminal per incoming path (``bypass_count + 1`` terminals).  With 96
+    bypasses, M has 97 predecessors.
+    """
+    bypasses = [f"S{i:02d}" for i in range(bypass_count)]
+    terminals = [f"T{j:02d}" for j in range(bypass_count + 1)]
+    nodes = ["R", "A", "M", *bypasses, *terminals]
+    edges = [["R", "A"], ["A", "M"]]
+    for s in bypasses:
+        edges += [["R", s], [s, "M"]]
+    for t in terminals:
+        edges.append(["M", t])
+    return {
+        "nodes": nodes,
+        "root": "R",
+        "terminals": terminals,
+        "edges": edges,
+    }
+
+
+def test_wide_merge_bypass_audit():
+    bypasses = [f"S{i:02d}" for i in range(96)]
+    terminals = [f"T{j:02d}" for j in range(97)]
+    out = audit_graph(wide_merge_payload())
+
+    # Immediate dominators.
+    idom = {d["node"]: d["immediate_dominator"] for d in out["dominators"]}
+    assert idom["R"] is None
+    assert idom["M"] == "R"          # the 96 bypasses route around A
+    assert idom["A"] == "R"
+    for s in bypasses:
+        assert idom[s] == "R"
+    for t in terminals:
+        assert idom[t] == "M"
+
+    # Critical relays: M alone, dominating all 97 terminals.
+    critical = {c["node"]: c["dominated_terminals"] for c in out["critical_relays"]}
+    assert critical == {"M": 97}
+    assert "A" not in critical
+    assert all(s not in critical for s in bypasses)
+
+    # Reachability: every terminal is reachable and listed with idom M.
+    assert out["reachable_node_count"] == 3 + 96 + 97
+    assert out["unreachable_terminals"] == []
+    reachable_terminals = sorted(
+        d["node"] for d in out["dominators"] if d["node"] in set(terminals)
+    )
+    assert reachable_terminals == terminals
+    assert all(
+        d["immediate_dominator"] == "M"
+        for d in out["dominators"] if d["node"] in set(terminals)
+    )
+
+    # Cross-recomputation: the critical count equals the number of
+    # reachable terminals whose idom chain reaches them via M, and the
+    # declared terminal set reproduces every one of those entries.
+    assert critical["M"] == len(reachable_terminals)
+    assert len(out["dominators"]) == out["reachable_node_count"]
+
+
 def expect_invalid(payload, *expected_types):
     with pytest.raises(AuditValidationError) as exc:
         audit_graph(payload)

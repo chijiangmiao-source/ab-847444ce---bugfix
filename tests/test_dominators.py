@@ -172,6 +172,87 @@ def test_deep_chain_is_iterative_no_recursion():
     assert len(r.vertex) == n
 
 
+def test_wide_merge_emergency_beam_stop_network():
+    # Root R feeds merge M through relay A *and* through 96 independent
+    # bypass relays, one unique relay per bypass.  M then feeds 97 sink
+    # terminals.  The bypasses route around A, so A dominates nothing and
+    # M's immediate dominator is R; M alone is critical, for all 97
+    # terminals.  This is the wide fan-in (97 predecessors) case that a
+    # "sample one predecessor per DFS region" heuristic gets wrong.
+    bypass_count = 96
+    terminal_count = bypass_count + 1
+
+    r_id, a_id, m_id = 0, 1, 2
+    bypass_ids = list(range(3, 3 + bypass_count))
+    terminal_ids = list(range(3 + bypass_count, 3 + bypass_count + terminal_count))
+    n = 3 + bypass_count + terminal_count
+
+    edges = [(r_id, a_id), (a_id, m_id)]
+    for s in bypass_ids:
+        edges += [(r_id, s), (s, m_id)]
+    for t in terminal_ids:
+        edges.append((m_id, t))
+
+    is_terminal = [False] * n
+    for t in terminal_ids:
+        is_terminal[t] = True
+
+    result = compute_dominators(
+        n, _adj(n, edges), _pre(n, edges), r_id,
+        is_terminal, [str(i) for i in range(n)],
+    )
+
+    # ---- Cross-check against the independent deletion oracle -----------
+    adj = _adj(n, edges)
+    reach = reachable_set(adj, r_id)
+    _, expected_idom = brute_force_idom(edges, n, r_id)
+    assert set(result.vertex) == reach
+    assert result.idom == expected_idom
+
+    # Direct assertions of the reported emergency topology.
+    assert result.idom[m_id] == r_id      # bypasses make R dominate M
+    assert result.idom[a_id] == r_id
+    for s in bypass_ids:
+        assert result.idom[s] == r_id
+    for t in terminal_ids:
+        assert result.idom[t] == m_id
+
+    counts = count_dominated_terminals(result)
+    # Recompute every count independently via node-deletion reachability.
+    reachable_terminals = {t for t in terminal_ids if t in reach}
+    for u in range(n):
+        if not result.reachable[u]:
+            continue
+        surviving = reachable_set(adj, r_id, banned=u)
+        expected = len(reachable_terminals - surviving)
+        assert counts[u] == expected, (u, counts[u], expected)
+    # The decisive numbers: A and every bypass relay dominate nothing;
+    # M (and only M among relays) dominates all 97 terminals.
+    assert counts[a_id] == 0
+    assert all(counts[s] == 0 for s in bypass_ids)
+    assert counts[m_id] == terminal_count
+    # Every protected terminal is reachable.
+    assert reachable_terminals == set(terminal_ids)
+
+
+@pytest.mark.parametrize("bypass_count", [1, 2, 95, 96, 200])
+def test_wide_merge_matches_bruteforce_across_widths(bypass_count):
+    # Same shape at several fan-in widths (M has bypass_count+1 preds),
+    # including exactly 97 predecessors where the old region heuristic
+    # first discarded a predecessor.
+    terminal_count = bypass_count + 1
+    n = 3 + bypass_count + terminal_count
+    r_id, a_id, m_id = 0, 1, 2
+    bypass_ids = range(3, 3 + bypass_count)
+    terminal_ids = range(3 + bypass_count, n)
+    edges = [(r_id, a_id), (a_id, m_id)]
+    for s in bypass_ids:
+        edges += [(r_id, s), (s, m_id)]
+    for t in terminal_ids:
+        edges.append((m_id, t))
+    assert_matches_bruteforce(edges, n)
+
+
 def test_classic_lt_example():
     # Graph from the Lengauer-Tarjan paper (Figure 1-ish), root R=0.
     # R->A,B,C ; A->D ; B->A,D ; C->B,D ; D->E ; E->B,F,G ;

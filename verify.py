@@ -5,9 +5,9 @@ Runs, in order:
   1. the full pytest suite (dominator core, validation, HTTP layer);
   2. an application build/import check -- the FastAPI app and its routes
      load cleanly and every route's handler is importable;
-  3. an HTTP smoke test against the running API service, covering the four
-     required topologies: diamond bypass, serial critical point, parallel
-     edges and an unreachable terminal.
+  3. an HTTP smoke test against the running API service, covering the five
+     required topologies: diamond bypass, the 96-bypass wide merge, serial
+     critical point, parallel edges and an unreachable terminal.
 
 Exits 0 only if every stage passes; any failure exits non-zero so the
 container's status is a conclusive pass/fail.
@@ -102,6 +102,25 @@ def check(name: str, condition: bool, detail: str = "") -> bool:
     return condition
 
 
+def wide_merge_payload(bypass_count: int = 96) -> dict:
+    """R->A->M plus ``bypass_count`` independent R->S<i>->M bypasses.
+
+    M feeds ``bypass_count + 1`` protected terminals (97 at width 96).
+    """
+    bypasses = [f"S{i:02d}" for i in range(bypass_count)]
+    terminals = [f"T{j:02d}" for j in range(bypass_count + 1)]
+    edges = [["R", "A"], ["A", "M"]]
+    for s in bypasses:
+        edges += [["R", s], [s, "M"]]
+    edges += [["M", t] for t in terminals]
+    return {
+        "nodes": ["R", "A", "M", *bypasses, *terminals],
+        "root": "R",
+        "terminals": terminals,
+        "edges": edges,
+    }
+
+
 def run_http_smoke() -> bool:
     stage("3/3 HTTP smoke tests")
     if not wait_for_health():
@@ -126,6 +145,32 @@ def run_http_smoke() -> bool:
                 "A" not in critical and "B" not in critical, str(critical))
     ok &= check("diamond: merge M is the sole critical relay",
                 critical == {"M": 1}, str(critical))
+
+    # --- Wide merge: R->A->M plus 96 independent bypasses around A; the
+    # merge feeds 97 protected terminals.  A and every bypass relay must
+    # not be critical; idom(M) must be R, M the only critical relay.
+    status, body = http_post("/api/audit", wide_merge_payload())
+    idom = {d["node"]: d["immediate_dominator"] for d in body.get("dominators", [])}
+    critical = {c["node"]: c["dominated_terminals"]
+                for c in body.get("critical_relays", [])}
+    bypasses = [f"S{i:02d}" for i in range(96)]
+    terminals = [f"T{j:02d}" for j in range(97)]
+    ok &= check("wide-merge: HTTP 200", status == 200, f"status={status} body={body}")
+    ok &= check("wide-merge: idom(M)=R (bypasses route around A)",
+                idom.get("M") == "R", f"idom(M)={idom.get('M')}")
+    ok &= check("wide-merge: A is not a critical relay",
+                "A" not in critical, str(critical))
+    ok &= check("wide-merge: bypass relays are not critical",
+                all(s not in critical for s in bypasses), str(critical))
+    ok &= check("wide-merge: M is the sole critical relay (97 terminals)",
+                critical == {"M": 97}, str(critical))
+    ok &= check("wide-merge: all 97 terminals reachable with idom M",
+                body.get("unreachable_terminals") == []
+                and all(idom.get(t) == "M" for t in terminals),
+                f"unreachable={body.get('unreachable_terminals')}")
+    ok &= check("wide-merge: reachable count covers every node",
+                body.get("reachable_node_count") == 3 + 96 + 97,
+                str(body.get("reachable_node_count")))
 
     # --- Serial chain: every relay is a single point of failure.
     status, body = http_post("/api/audit", {
