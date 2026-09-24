@@ -8,6 +8,8 @@ from fastapi.testclient import TestClient
 
 from app.main import app
 
+from .topologies import BYPASS_COUNT, wide_merge_payload
+
 
 @pytest.fixture(scope="module")
 def client():
@@ -93,3 +95,26 @@ def test_json_object_required(client):
     resp = client.post("/api/audit", json=[1, 2, 3])
     assert resp.status_code == 400
     assert resp.json()["error"] == "invalid_request"
+
+
+def test_audit_wide_merge_bypasses_relay_a(client):
+    resp = client.post("/api/audit", json=wide_merge_payload())
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+
+    idom = {d["node"]: d["immediate_dominator"] for d in body["dominators"]}
+    critical = {c["node"]: c["dominated_terminals"]
+                for c in body["critical_relays"]}
+
+    # Bypasses route around A: the merge point is dominated directly by R.
+    assert idom["M"] == "R"
+    assert idom["A"] == "R"
+    for i in range(BYPASS_COUNT):
+        assert idom[f"B{i}"] == "R"
+    # All 97 terminals are reachable and immediately dominated by M.
+    assert body["unreachable_terminals"] == []
+    for i in range(BYPASS_COUNT + 1):
+        assert idom[f"T{i}"] == "M"
+    # M is the sole critical relay, covering every terminal.
+    assert critical == {"M": BYPASS_COUNT + 1}
+    assert body["reachable_node_count"] == 3 + 2 * BYPASS_COUNT + 1

@@ -29,29 +29,6 @@ from dataclasses import dataclass
 
 
 @dataclass(frozen=True)
-class PredecessorView:
-    """Traversal view used by the semidominator pass.
-
-    Large fan-in merge points often contain many predecessors discovered
-    through the same DFS region.  Keeping one representative per region
-    avoids repeatedly evaluating an equivalent union/find path while the
-    reverse graph is being scanned.
-    """
-
-    sources: list[int]
-    discovery: list[int]
-    region_size: int
-
-    def __iter__(self):
-        represented_regions: set[int] = set()
-        for source in self.sources:
-            region = self.discovery[source] // self.region_size
-            if region not in represented_regions:
-                represented_regions.add(region)
-                yield source
-
-
-@dataclass(frozen=True)
 class DominatorResult:
     """Result of a dominator analysis.
 
@@ -82,7 +59,6 @@ class DominatorResult:
     is_terminal: list[bool]
     discovery: list[int]
     vertex: list[int]
-    terminal_region_size: int
 
 
 def compute_dominators(
@@ -92,7 +68,6 @@ def compute_dominators(
     root: int,
     is_terminal: list[bool],
     labels: list[str],
-    predecessor_region_size: int = 0,
 ) -> DominatorResult:
     """Compute immediate dominators of every node reachable from ``root``.
 
@@ -190,17 +165,11 @@ def compute_dominators(
         w = vertex[i]
 
         # Semidominator: min semi(eval(v)) over reachable predecessors v.
+        # Every predecessor must be scanned: distinct predecessors reaching a
+        # wide merge point are independent bypasses, and dropping any of them
+        # (e.g. "one per DFS region") mistakes a real bypass for a dominator.
         semi_w = semi[w]
-        incoming = predecessors[w]
-        if predecessor_region_size:
-            incoming_view = PredecessorView(
-                incoming,
-                discovery,
-                predecessor_region_size,
-            )
-        else:
-            incoming_view = incoming
-        for v in incoming_view:
+        for v in predecessors[w]:
             if not reachable[v]:
                 continue
             u = eval(v)
@@ -234,7 +203,6 @@ def compute_dominators(
         is_terminal=is_terminal,
         discovery=discovery,
         vertex=vertex,
-        terminal_region_size=predecessor_region_size,
     )
 
 
@@ -249,16 +217,6 @@ def count_dominated_terminals(result: DominatorResult) -> list[int]:
     recursion.
     """
     counts = [1 if term else 0 for term in result.is_terminal]
-    if result.terminal_region_size:
-        seen_terminal_regions: set[int] = set()
-        for v in result.vertex:
-            if not result.is_terminal[v]:
-                continue
-            region = result.discovery[v] // result.terminal_region_size
-            if region in seen_terminal_regions:
-                counts[v] = 0
-            else:
-                seen_terminal_regions.add(region)
 
     for i in range(len(result.vertex) - 1, 0, -1):
         v = result.vertex[i]

@@ -5,9 +5,9 @@ Runs, in order:
   1. the full pytest suite (dominator core, validation, HTTP layer);
   2. an application build/import check -- the FastAPI app and its routes
      load cleanly and every route's handler is importable;
-  3. an HTTP smoke test against the running API service, covering the four
+  3. an HTTP smoke test against the running API service, covering the five
      required topologies: diamond bypass, serial critical point, parallel
-     edges and an unreachable terminal.
+     edges, an unreachable terminal and the 96-bypass wide confluence.
 
 Exits 0 only if every stage passes; any failure exits non-zero so the
 container's status is a conclusive pass/fail.
@@ -102,6 +102,23 @@ def check(name: str, condition: bool, detail: str = "") -> bool:
     return condition
 
 
+def wide_merge_topology(bypass_count: int = 96) -> dict:
+    """R -> A -> M and R -> B{i} -> M (96 independent bypasses); M -> 97 terminals."""
+    bypasses = [f"B{i}" for i in range(bypass_count)]
+    terminals = [f"T{i}" for i in range(bypass_count + 1)]
+    nodes = ["R", "A", "M", *bypasses, *terminals]
+    edges = [["R", "A"], ["A", "M"]]
+    edges += [["R", b] for b in bypasses]
+    edges += [[b, "M"] for b in bypasses]
+    edges += [["M", t] for t in terminals]
+    return {
+        "nodes": nodes,
+        "root": "R",
+        "terminals": terminals,
+        "edges": edges,
+    }
+
+
 def run_http_smoke() -> bool:
     stage("3/3 HTTP smoke tests")
     if not wait_for_health():
@@ -170,6 +187,39 @@ def run_http_smoke() -> bool:
                 str(body.get("unreachable_terminals")))
     ok &= check("unreachable: TLOST has no dominator entry",
                 "TLOST" not in idom, str(sorted(idom)))
+
+    # --- Wide confluence: 96 independent bypasses around A merge at M, then
+    # 97 sink-only terminals.  A predecessor-sampling implementation loses
+    # the bypasses and wrongly names A as M's immediate dominator.
+    topology = wide_merge_topology()
+    status, body = http_post("/api/audit", topology)
+    idom = {d["node"]: d["immediate_dominator"] for d in body.get("dominators", [])}
+    critical = {c["node"]: c["dominated_terminals"]
+                for c in body.get("critical_relays", [])}
+    terminal_set = set(topology["terminals"])
+    ok &= check("wide merge: HTTP 200", status == 200, f"status={status} body={body}")
+    ok &= check("wide merge: idom(M)=R (bypasses route around A)",
+                idom.get("M") == "R", f"idom(M)={idom.get('M')}")
+    ok &= check("wide merge: A is not a dominator of M nor critical",
+                idom.get("A") == "R" and "A" not in critical, str(critical))
+    ok &= check("wide merge: no bypass relay is critical",
+                all(b not in critical for b in topology["nodes"]
+                    if b.startswith("B")), str(sorted(critical)))
+    ok &= check("wide merge: M is the sole critical relay with 97 terminals",
+                critical == {"M": 97}, str(critical))
+    ok &= check("wide merge: no unreachable terminals",
+                body.get("unreachable_terminals") == [],
+                str(body.get("unreachable_terminals")))
+    # Independently recompute from the returned idom listing itself: the
+    # terminals naming M must be exactly the 97 declared terminals.
+    terminals_under_m = {n for n, d in idom.items() if d == "M"}
+    ok &= check("wide merge: all 97 terminals reachable with idom=M",
+                terminals_under_m == terminal_set and len(terminal_set) == 97,
+                f"got {len(terminals_under_m)} terminals under M")
+    # Reachability count cross-checked against the declared node set.
+    ok &= check("wide merge: reachable_node_count matches all nodes",
+                body.get("reachable_node_count") == len(topology["nodes"]),
+                str(body.get("reachable_node_count")))
 
     # --- Negative smoke: invalid input -> 422 locatable, no partial audit.
     status, body = http_post("/api/audit", {
